@@ -124,7 +124,7 @@ func (c *WSSignalConnection) ReadWorkerMessage() (*livekit.WorkerMessage, int, e
 	}
 }
 
-func (c *WSSignalConnection) WriteResponse(msg *livekit.SignalResponse) (int, error) {
+func (c *WSSignalConnection) WriteResponse(msg proto.Message) (int, error) {
 	var msgType int
 	var payload []byte
 	var err error

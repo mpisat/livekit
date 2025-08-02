@@ -30,6 +30,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/atomic"
 	"golang.org/x/exp/maps"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
@@ -86,7 +87,7 @@ func NewRTCService(
 }
 
 func (s *RTCService) SetupRoutes(mux *http.ServeMux) {
-	mux.Handle("/rtc", s)
+	mux.HandleFunc("/rtc", s.connect)
 	mux.HandleFunc("/rtc/validate", s.validate)
 }
 
@@ -174,7 +175,7 @@ func (s *RTCService) validateInternal(lgr logger.Logger, r *http.Request, strict
 	return res.roomName, pi, code, err
 }
 
-func (s *RTCService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *RTCService) connect(w http.ResponseWriter, r *http.Request) {
 	// reject non websocket requests
 	if !websocket.IsWebSocketUpgrade(r) {
 		w.WriteHeader(404)
@@ -238,7 +239,7 @@ func (s *RTCService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// give it a few attempts to start session
 	var cr connectionResult
-	var initialResponse *livekit.SignalResponse
+	var initialResponse proto.Message
 	for attempt := 0; attempt < s.config.SignalRelay.ConnectAttempts; attempt++ {
 		connectionTimeout := 3 * time.Second * time.Duration(attempt+1)
 		ctx := utils.ContextWithAttempt(r.Context(), attempt)
@@ -262,23 +263,30 @@ func (s *RTCService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prometheus.IncrementParticipantJoin(1)
 
 	pLogger = pLogger.WithValues("connID", cr.ConnectionID)
-	if !pi.Reconnect && initialResponse.GetJoin() != nil {
-		joinRoomID := livekit.RoomID(initialResponse.GetJoin().GetRoom().GetSid())
-		if joinRoomID != "" {
-			roomID = joinRoomID
-		}
-
-		pi.ID = livekit.ParticipantID(initialResponse.GetJoin().GetParticipant().GetSid())
-		pID = pi.ID
-
-		resolveLogger(false)
-	}
 
 	signalStats := telemetry.NewBytesSignalStats(r.Context(), s.telemetry)
-	if join := initialResponse.GetJoin(); join != nil {
-		signalStats.ResolveRoom(join.GetRoom())
-		signalStats.ResolveParticipant(join.GetParticipant())
+
+	signalResponse, ok := initialResponse.(*livekit.SignalResponse)
+	if ok {
+		joinResponse := signalResponse.GetJoin()
+		if joinResponse != nil {
+			if !pi.Reconnect {
+				joinRoomID := livekit.RoomID(joinResponse.GetRoom().GetSid())
+				if joinRoomID != "" {
+					roomID = joinRoomID
+				}
+
+				pi.ID = livekit.ParticipantID(joinResponse.GetParticipant().GetSid())
+				pID = pi.ID
+
+				resolveLogger(false)
+			}
+
+			signalStats.ResolveRoom(joinResponse.GetRoom())
+			signalStats.ResolveParticipant(joinResponse.GetParticipant())
+		}
 	}
+
 	if pi.Reconnect && pi.ID != "" {
 		signalStats.ResolveParticipant(&livekit.ParticipantInfo{
 			Sid:      string(pi.ID),
@@ -502,7 +510,7 @@ func (s *RTCService) startConnection(
 	roomName livekit.RoomName,
 	pi routing.ParticipantInit,
 	timeout time.Duration,
-) (connectionResult, *livekit.SignalResponse, error) {
+) (connectionResult, proto.Message, error) {
 	var cr connectionResult
 	var err error
 
